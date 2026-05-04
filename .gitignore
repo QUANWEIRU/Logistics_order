@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# 系统与本地工具
+.DS_Store
+.claude/
+
+# Node
+node_delivery_tracker/node_modules/
+
+# 业务 Excel（运单与客户信息），不提交公开仓库；示例请自备放入 input/
+input/*.xlsx
+input/*.XLSX
+output/*
+!output/.gitkeep
+
+# Excel 占用锁文件
+**/~$*
+
+# 密钥与本地配置
+.env
+.env.*
