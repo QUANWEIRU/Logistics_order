@@ -15,6 +15,7 @@ from datetime import datetime
 import streamlit as st
 
 from dhl_piece_ids import fetch_piece_ids_batch, parse_tracking_id
+from dhl_result_xlsx import build_result_workbook_bytes
 from excel_tracking import (
     merge_waybill_lists,
     parse_waybill_text,
@@ -327,12 +328,30 @@ def main() -> None:
     )
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     prefix = "dhl_piece" if carrier == "DHL（子单 JD）" else "fedex_related"
-    st.download_button(
-        "下载 CSV",
-        data=csv_bytes,
-        file_name=f"{prefix}_{ts}.csv",
-        mime="text/csv",
-    )
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        st.download_button(
+            "下载 CSV",
+            data=csv_bytes,
+            file_name=f"{prefix}_{ts}.csv",
+            mime="text/csv",
+        )
+    with dl2:
+        try:
+            xlsx_bytes = build_result_workbook_bytes(
+                rows,
+                related_col=related_col,
+                is_dhl=(carrier == "DHL（子单 JD）"),
+            )
+            st.download_button(
+                "下载 Excel（汇总+转换明细）",
+                data=xlsx_bytes,
+                file_name=f"{prefix}_{ts}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="与 CSV 列一致的「汇总」表，另附「子单明细」：一格多子单展开为每行一条 JD。",
+            )
+        except ImportError:
+            st.caption("导出 Excel 需安装 openpyxl。")
 
 
 if __name__ == "__main__":
