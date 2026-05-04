@@ -22,6 +22,19 @@ _HEADER_HINTS = frozenset(
 )
 
 
+def _excel_metric_display(value: object) -> str:
+    """重量/数量/价值等单元格转为展示字符串。"""
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        if value == int(value):
+            return str(int(value))
+        return str(value).strip()
+    if isinstance(value, int):
+        return str(value)
+    return str(value).strip()
+
+
 def _normalize_cell(value: object) -> str | None:
     """单元格转为运单字符串；Excel 长数字常为 float。"""
     if value is None:
@@ -82,6 +95,84 @@ def read_waybills_from_xlsx(
                     continue
             out.append(raw)
         return out
+    finally:
+        wb.close()
+
+
+def read_waybills_with_dhl_extras_from_xlsx(
+    path_or_file: str | BinaryIO | bytes,
+    *,
+    sheet_index: int = 0,
+    waybill_column_index: int = 2,
+    skip_header_row: bool = True,
+    weight_column_index: int = 5,
+    description_column_index: int = 6,
+    quantity_column_index: int = 7,
+    value_column_index: int = 10,
+) -> tuple[list[str], dict[str, dict[str, str]]]:
+    """
+    读取转单号列，并附带 DHL 主表常见列：F 结算重、G 中文品名、H 总数量、K 申报价值。
+
+    与 ``read_waybills_from_xlsx`` 相同的表头/首行过滤规则；同一转单号多行时以**首次**出现行为准。
+    返回 (转单号列表, extras)，extras 含键：重量、产品描述、数量、价值。
+    """
+    try:
+        import openpyxl
+    except ImportError as e:
+        raise ImportError("读取 Excel 需要 openpyxl：pip install openpyxl") from e
+
+    if isinstance(path_or_file, bytes):
+        wb = openpyxl.load_workbook(io.BytesIO(path_or_file), read_only=True, data_only=True)
+    elif hasattr(path_or_file, "read"):
+        wb = openpyxl.load_workbook(path_or_file, read_only=True, data_only=True)
+    else:
+        wb = openpyxl.load_workbook(path_or_file, read_only=True, data_only=True)
+
+    max_ci = max(
+        waybill_column_index,
+        weight_column_index,
+        description_column_index,
+        quantity_column_index,
+        value_column_index,
+    )
+
+    try:
+        ws = wb.worksheets[sheet_index]
+        out: list[str] = []
+        extras: dict[str, dict[str, str]] = {}
+        for idx, row in enumerate(
+            ws.iter_rows(min_row=1, max_col=max_ci + 1, values_only=True)
+        ):
+            if row is None or len(row) <= waybill_column_index:
+                continue
+            raw = _normalize_cell(row[waybill_column_index])
+            if not raw:
+                continue
+            if skip_header_row and idx == 0:
+                low_hints = {h.lower() for h in _HEADER_HINTS}
+                if raw in _HEADER_HINTS or raw.lower() in low_hints:
+                    continue
+                if not re.fullmatch(r"[0-9A-Za-z\-]{4,50}", raw):
+                    continue
+            out.append(raw)
+            if raw not in extras:
+                extras[raw] = {
+                    "重量": _excel_metric_display(
+                        row[weight_column_index] if len(row) > weight_column_index else None
+                    ),
+                    "产品描述": _excel_metric_display(
+                        row[description_column_index]
+                        if len(row) > description_column_index
+                        else None
+                    ),
+                    "数量": _excel_metric_display(
+                        row[quantity_column_index] if len(row) > quantity_column_index else None
+                    ),
+                    "价值": _excel_metric_display(
+                        row[value_column_index] if len(row) > value_column_index else None
+                    ),
+                }
+        return out, extras
     finally:
         wb.close()
 

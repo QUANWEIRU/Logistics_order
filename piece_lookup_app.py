@@ -15,7 +15,12 @@ from datetime import datetime
 import streamlit as st
 
 from dhl_piece_ids import fetch_piece_ids_batch, parse_tracking_id
-from excel_tracking import merge_waybill_lists, parse_waybill_text, read_waybills_from_xlsx
+from excel_tracking import (
+    merge_waybill_lists,
+    parse_waybill_text,
+    read_waybills_from_xlsx,
+    read_waybills_with_dhl_extras_from_xlsx,
+)
 from fedex_tracking import fetch_fedex_related_tracking_scrape_batch, normalize_fedex_tracking
 
 st.set_page_config(page_title="物流转单号查询", layout="wide")
@@ -53,23 +58,36 @@ def _results_to_csv_rows(
     *,
     display_waybills: dict[str, str] | None = None,
     related_column: str = "子单号",
+    xlsx_extras_by_waybill: dict[str, dict[str, str]] | None = None,
 ) -> bytes:
     """display_waybills: tid -> 用户侧的转单号展示串（与表格「转单号」列一致）。"""
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["转单号", related_column, "关联条数", "耗时(秒)"])
+    header = ["转单号", related_column, "关联条数", "耗时(秒)"]
+    if xlsx_extras_by_waybill:
+        header.extend(["重量", "产品描述", "数量", "价值"])
+    w.writerow(header)
     for tid in sorted(mapping.keys()):
         pieces = mapping[tid]
         row_waybill = (display_waybills or {}).get(tid, tid)
         elapsed = timings_sec.get(tid)
-        w.writerow(
-            [
-                row_waybill,
-                " ".join(pieces) if pieces else "",
-                len(pieces),  # 关联条数（DHL 为子单数；FedEx 为解析到的运单号个数）
-                f"{elapsed:.2f}" if elapsed is not None else "",
-            ]
-        )
+        row_vals: list[str | int] = [
+            row_waybill,
+            " ".join(pieces) if pieces else "",
+            len(pieces),  # 关联条数（DHL 为子单数；FedEx 为解析到的运单号个数）
+            f"{elapsed:.2f}" if elapsed is not None else "",
+        ]
+        if xlsx_extras_by_waybill:
+            ex = xlsx_extras_by_waybill.get(row_waybill, {})
+            row_vals.extend(
+                [
+                    ex.get("重量", ""),
+                    ex.get("产品描述", ""),
+                    ex.get("数量", ""),
+                    ex.get("价值", ""),
+                ]
+            )
+        w.writerow(row_vals)
     return buf.getvalue().encode("utf-8-sig")
 
 
@@ -116,12 +134,28 @@ def main() -> None:
     tab_xlsx, tab_text = st.tabs(["上传 Excel", "粘贴单号"])
 
     file_wb: list[str] = []
+    # 上传 Excel 时按 DHL 主表列位读取 F/G/H/K（重量、产品描述、数量、价值），键为单元格转单号原串
+    file_xlsx_extras: dict[str, dict[str, str]] = {}
     with tab_xlsx:
         up = st.file_uploader("选择 xlsx 文件", type=("xlsx",))
         if up is not None:
             try:
-                file_wb = read_waybills_from_xlsx(up.read(), sheet_index=0, column_index=column_index)
+                raw_xlsx = up.read()
+                if carrier == "DHL（子单 JD）":
+                    file_wb, file_xlsx_extras = read_waybills_with_dhl_extras_from_xlsx(
+                        raw_xlsx,
+                        sheet_index=0,
+                        waybill_column_index=column_index,
+                    )
+                else:
+                    file_wb = read_waybills_from_xlsx(
+                        raw_xlsx, sheet_index=0, column_index=column_index
+                    )
                 st.success(f"已从表格读取 **{len(file_wb)}** 个转单号（列索引 {column_index}）。")
+                if carrier == "DHL（子单 JD）" and file_xlsx_extras:
+                    st.caption(
+                        "已关联表内列：**重量**(F)、**产品描述**(G)、**数量**(H)、**价值**(K)，将并入查询结果。"
+                    )
             except Exception as e:
                 st.error(f"读取 Excel 失败：{e}")
 
@@ -240,6 +274,8 @@ def main() -> None:
     related_col = "子单号(JD)" if carrier == "DHL（子单 JD）" else "关联运单号(12位)"
     rows = []
     tid_to_display: dict[str, str] = {}
+    # 仅 DHL 且本次会话读过带附加列的 Excel 时，在结果中展示重量/产品描述/数量/价值
+    show_xlsx_cols = carrier == "DHL（子单 JD）" and bool(file_xlsx_extras)
     for wb in merged:
         if carrier == "DHL（子单 JD）":
             tid = parse_tracking_id(wb)
@@ -247,15 +283,14 @@ def main() -> None:
             try:
                 tid = normalize_fedex_tracking(wb)
             except ValueError:
-                rows.append(
-                    {
-                        "转单号": wb,
-                        related_col: "",
-                        "关联条数": 0,
-                        "耗时(秒)": "",
-                        "状态": "运单号无效",
-                    }
-                )
+                row_inv: dict[str, str | int] = {
+                    "转单号": wb,
+                    related_col: "",
+                    "关联条数": 0,
+                    "耗时(秒)": "",
+                    "状态": "运单号无效",
+                }
+                rows.append(row_inv)
                 continue
         tid_to_display[tid] = wb
         pcs = result.get(tid, [])
@@ -265,15 +300,20 @@ def main() -> None:
             status = "成功" if ok else "未解析到子单号"
         else:
             status = "成功" if ok else "未解析到关联运单号"
-        rows.append(
-            {
-                "转单号": wb,
-                related_col: " ".join(pcs) if pcs else "",
-                "关联条数": len(pcs),
-                "耗时(秒)": f"{sec:.2f}" if sec is not None else "",
-                "状态": status,
-            }
-        )
+        row_out: dict[str, str | int] = {
+            "转单号": wb,
+            related_col: " ".join(pcs) if pcs else "",
+            "关联条数": len(pcs),
+            "耗时(秒)": f"{sec:.2f}" if sec is not None else "",
+            "状态": status,
+        }
+        if show_xlsx_cols:
+            ex = file_xlsx_extras.get(wb, {})
+            row_out["重量"] = ex.get("重量", "")
+            row_out["产品描述"] = ex.get("产品描述", "")
+            row_out["数量"] = ex.get("数量", "")
+            row_out["价值"] = ex.get("价值", "")
+        rows.append(row_out)
 
     st.subheader("结果")
     st.dataframe(rows, use_container_width=True)
@@ -283,6 +323,7 @@ def main() -> None:
         timings_sec,
         display_waybills=tid_to_display,
         related_column=related_col,
+        xlsx_extras_by_waybill=file_xlsx_extras if show_xlsx_cols else None,
     )
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     prefix = "dhl_piece" if carrier == "DHL（子单 JD）" else "fedex_related"
