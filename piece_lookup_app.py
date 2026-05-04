@@ -21,6 +21,32 @@ from fedex_tracking import fetch_fedex_related_tracking_scrape_batch, normalize_
 st.set_page_config(page_title="物流转单号查询", layout="wide")
 
 
+def _is_streamlit_community_cloud() -> bool:
+    """判断是否在 Streamlit Community Cloud（用于提示首轮需下载 Playwright 浏览器）。"""
+    here = os.path.abspath(__file__).replace("\\", "/")
+    if "/mount/src/" in here:
+        return True
+    url = (
+        os.environ.get("STREAMLIT_APP_URL", "")
+        + os.environ.get("STREAMLIT_URL", "")
+    ).lower()
+    return "streamlit.app" in url
+
+
+def _dhl_api_key_resolved(sidebar_input: str) -> str | None:
+    """侧边栏、环境变量、Streamlit Secrets 中的 DHL API Key（任一非空即可）。"""
+    for raw in ((sidebar_input or "").strip(), (os.environ.get("DHL_API_KEY") or "").strip()):
+        if raw:
+            return raw
+    try:
+        if "DHL_API_KEY" in st.secrets:
+            s = str(st.secrets["DHL_API_KEY"]).strip()
+            return s or None
+    except (AttributeError, FileNotFoundError, KeyError, RuntimeError, TypeError):
+        pass
+    return None
+
+
 def _results_to_csv_rows(
     mapping: dict[str, list[str]],
     timings_sec: dict[str, float],
@@ -54,6 +80,11 @@ def main() -> None:
         "**FedEx**：解析同一托运下的多件 **12 位** 关联运单号（如主单 871241251143 与 871241251154）；"
         "使用 Playwright 打开 [FedEx 追踪页](https://www.fedex.com/fedextrack/)（首页 [fedex.com/zh-cn](https://www.fedex.com/zh-cn/home.html) 无密钥直连易被 WAF 拦截）。"
     )
+    if _is_streamlit_community_cloud():
+        st.info(
+            "当前为 **Streamlit 云端**：首次使用「网页抓取」时会自动下载对应浏览器内核（约数百 MB，可能需数分钟），"
+            "请耐心等待；**DHL** 也可在 **Settings → Secrets** 配置 `DHL_API_KEY` 走官方 API，避免依赖浏览器。"
+        )
 
     with st.sidebar:
         st.header("选项")
@@ -124,7 +155,22 @@ def main() -> None:
     if not run or not merged:
         return
 
-    api_key = api_key_in.strip() or os.environ.get("DHL_API_KEY") or None
+    api_key = _dhl_api_key_resolved(api_key_in)
+    cloud = _is_streamlit_community_cloud()
+    if cloud and carrier == "FedEx（关联运单号）":
+        st.warning(
+            "云端首次 FedEx 网页抓取会下载 Playwright 浏览器，耗时较长；若失败可在本机执行 "
+            "`pip install -r requirements.txt && python -m playwright install firefox` 后本地运行。"
+        )
+    if cloud and carrier == "DHL（子单 JD）" and not api_key and not force_scrape:
+        st.warning(
+            "未配置 **DHL_API_KEY** 时将走网页抓取（云端首次会下载浏览器）。"
+            "更稳定的方式：在 **Settings → Secrets** 或侧边栏填写密钥（[DHL Developer](https://developer.dhl.com)）。"
+        )
+    if cloud and carrier == "DHL（子单 JD）" and force_scrape:
+        st.warning(
+            "已勾选「强制网页抓取」：云端将使用浏览器而非 API，首次可能需较长时间下载内核。"
+        )
 
     progress = st.progress(0.0, text="准备中…")
 

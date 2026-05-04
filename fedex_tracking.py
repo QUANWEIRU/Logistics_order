@@ -13,6 +13,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from playwright_bootstrap import ensure_playwright_browser_installed
+
 # FedEx Express 常见为 12 位数字运单号（含多件 MPS 场景）
 FEDEX_TRACKING_12 = re.compile(r"\b\d{12}\b")
 
@@ -103,6 +105,8 @@ def fetch_fedex_related_tracking_scrape_batch(
         raise ImportError(
             "FedEx 网页抓取需要 Playwright：pip install playwright && playwright install firefox"
         ) from e
+
+    ensure_playwright_browser_installed(browser)
 
     raw_list: list[str] = []
     for x in tracking_numbers:

@@ -17,6 +17,8 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import httpx
 
+from playwright_bootstrap import ensure_playwright_browser_installed
+
 # DHL Express 子单号：网页示例为 JD + 18 位数字；保留略宽模式以兼容变化
 PIECE_ID_RE_STRICT = re.compile(r"\bJD\d{18}\b")
 PIECE_ID_RE_LOOSE = re.compile(r"\bJD[0-9A-Z]{10,32}\b")
@@ -185,6 +187,8 @@ def fetch_piece_ids_scrape(
             "无 API 抓取需要 Playwright：pip install playwright && playwright install firefox"
         ) from e
 
+    ensure_playwright_browser_installed(browser)
+
     tid = parse_tracking_id(url_or_number)
     if url_or_number.strip().startswith("http"):
         start_url = url_or_number.strip()
@@ -308,6 +312,8 @@ def fetch_piece_ids_scrape_batch(
         raise ImportError(
             "无 API 抓取需要 Playwright：pip install playwright && playwright install firefox"
         ) from e
+
+    ensure_playwright_browser_installed(browser)
 
     raw_list = [str(x).strip() for x in tracking_numbers if str(x).strip()]
     if dedupe:
