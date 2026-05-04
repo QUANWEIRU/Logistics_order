@@ -1,5 +1,7 @@
 """
 查询结果导出为 xlsx：「汇总」表与「子单明细」展开表（一格多子单拆成多行）。
+
+子单明细：按运单下子单条数均分重量、数量、价值（与订单行总量一致）；件数恒为 1（每件一行）。
 """
 
 from __future__ import annotations
@@ -26,6 +28,108 @@ def split_fedex_twelve_digit_from_cell(cell: str) -> list[str]:
     return list(dict.fromkeys(re.findall(r"\b\d{12}\b", cell)))
 
 
+def _parse_optional_float(raw: object) -> float | None:
+    if raw is None:
+        return None
+    s = str(raw).strip().replace(",", "")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _format_split_number(x: float) -> str:
+    """去掉多余尾随 0，如 23.0625、12、10.25。"""
+    s = f"{x:.10f}".rstrip("0").rstrip(".")
+    return s if s else "0"
+
+
+def build_carrier_detail_rows(
+    summary_rows: list[dict[str, Any]],
+    *,
+    related_col: str,
+    is_dhl: bool,
+) -> list[dict[str, Any]]:
+    """
+    由汇总行生成明细行（页面与 Excel 共用）。
+
+    DHL：列 转单号、子单号(JD)、件数、重量、产品描述、数量、价值（重量/数量/价值为按子单数均分）。
+    FedEx：列 转单号、关联单号、件数、耗时(秒)、状态（无 Excel 件重价时不拆分数值）。
+    """
+    out: list[dict[str, Any]] = []
+    for r in summary_rows:
+        waybill = str(r.get("转单号", ""))
+        cell = str(r.get(related_col, ""))
+        pieces = split_dhl_piece_ids_from_cell(cell) if is_dhl else split_fedex_twelve_digit_from_cell(cell)
+        n = len(pieces)
+
+        if is_dhl:
+            desc = str(r.get("产品描述", ""))
+            w_raw = r.get("重量", "")
+            q_raw = r.get("数量", "")
+            v_raw = r.get("价值", "")
+            wf = _parse_optional_float(w_raw)
+            qf = _parse_optional_float(q_raw)
+            vf = _parse_optional_float(v_raw)
+
+            if n == 0:
+                out.append(
+                    {
+                        "转单号": waybill,
+                        "子单号(JD)": "",
+                        "件数": "",
+                        "重量": str(w_raw),
+                        "产品描述": desc,
+                        "数量": str(q_raw),
+                        "价值": str(v_raw),
+                    }
+                )
+                continue
+
+            w_s = _format_split_number(wf / n) if wf is not None else str(w_raw)
+            q_s = _format_split_number(qf / n) if qf is not None else str(q_raw)
+            v_s = _format_split_number(vf / n) if vf is not None else str(v_raw)
+            for p in pieces:
+                out.append(
+                    {
+                        "转单号": waybill,
+                        "子单号(JD)": p,
+                        "件数": "1",
+                        "重量": w_s,
+                        "产品描述": desc,
+                        "数量": q_s,
+                        "价值": v_s,
+                    }
+                )
+        else:
+            sec = str(r.get("耗时(秒)", ""))
+            status = str(r.get("状态", ""))
+            if n == 0:
+                out.append(
+                    {
+                        "转单号": waybill,
+                        related_col: "",
+                        "件数": "",
+                        "耗时(秒)": sec,
+                        "状态": status,
+                    }
+                )
+                continue
+            for p in pieces:
+                out.append(
+                    {
+                        "转单号": waybill,
+                        related_col: p,
+                        "件数": "1",
+                        "耗时(秒)": sec,
+                        "状态": status,
+                    }
+                )
+    return out
+
+
 def build_result_workbook_bytes(
     rows: list[dict[str, Any]],
     *,
@@ -35,8 +139,8 @@ def build_result_workbook_bytes(
     """
     生成 xlsx 字节流。
 
-    - 第一张表「汇总」：与界面结果行一致（列顺序与 rows[0] 键顺序相同）。
-    - 第二张表「子单明细」或「单号明细」：将关联列拆成一行一件/一单号，其余列按行复制。
+    - 「汇总」：与 summary 行字典键顺序一致。
+    - 「子单明细」/「单号明细」：与 build_carrier_detail_rows 一致。
     """
     import openpyxl
 
@@ -56,48 +160,12 @@ def build_result_workbook_bytes(
 
     detail_name = "子单明细" if is_dhl else "单号明细"
     ws1 = wb.create_sheet(title=detail_name)
-    if is_dhl:
-        detail_headers = [
-            "转单号",
-            "子单号(JD)",
-            "重量",
-            "产品描述",
-            "数量",
-            "价值",
-            "耗时(秒)",
-            "状态",
-        ]
-    else:
-        detail_headers = ["转单号", related_col, "耗时(秒)", "状态"]
-    ws1.append(detail_headers)
-
-    for r in rows:
-        waybill = str(r.get("转单号", ""))
-        cell = str(r.get(related_col, ""))
-        pieces = split_dhl_piece_ids_from_cell(cell) if is_dhl else split_fedex_twelve_digit_from_cell(cell)
-        for p in pieces or [""]:
-            if is_dhl:
-                ws1.append(
-                    [
-                        waybill,
-                        p,
-                        str(r.get("重量", "")),
-                        str(r.get("产品描述", "")),
-                        str(r.get("数量", "")),
-                        str(r.get("价值", "")),
-                        str(r.get("耗时(秒)", "")),
-                        str(r.get("状态", "")),
-                    ]
-                )
-            else:
-                ws1.append(
-                    [
-                        waybill,
-                        p,
-                        str(r.get("耗时(秒)", "")),
-                        str(r.get("状态", "")),
-                    ]
-                )
+    detail_rows = build_carrier_detail_rows(rows, related_col=related_col, is_dhl=is_dhl)
+    if detail_rows:
+        dh = list(detail_rows[0].keys())
+        ws1.append(dh)
+        for dr in detail_rows:
+            ws1.append([dr.get(h, "") for h in dh])
 
     buf = io.BytesIO()
     wb.save(buf)

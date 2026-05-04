@@ -15,7 +15,7 @@ from datetime import datetime
 import streamlit as st
 
 from dhl_piece_ids import fetch_piece_ids_batch, parse_tracking_id
-from dhl_result_xlsx import build_result_workbook_bytes
+from dhl_result_xlsx import build_carrier_detail_rows, build_result_workbook_bytes
 from excel_tracking import (
     merge_waybill_lists,
     parse_waybill_text,
@@ -306,7 +306,6 @@ def main() -> None:
             related_col: " ".join(pcs) if pcs else "",
             "关联条数": len(pcs),
             "耗时(秒)": f"{sec:.2f}" if sec is not None else "",
-            "状态": status,
         }
         if show_xlsx_cols:
             ex = file_xlsx_extras.get(wb, {})
@@ -314,10 +313,22 @@ def main() -> None:
             row_out["产品描述"] = ex.get("产品描述", "")
             row_out["数量"] = ex.get("数量", "")
             row_out["价值"] = ex.get("价值", "")
+        row_out["状态"] = status
         rows.append(row_out)
 
-    st.subheader("结果")
+    st.subheader("汇总")
     st.dataframe(rows, use_container_width=True)
+
+    detail_rows = build_carrier_detail_rows(
+        rows,
+        related_col=related_col,
+        is_dhl=(carrier == "DHL（子单 JD）"),
+    )
+    if carrier == "DHL（子单 JD）":
+        st.subheader("子单明细")
+    else:
+        st.subheader("单号明细")
+    st.dataframe(detail_rows, use_container_width=True)
 
     csv_bytes = _results_to_csv_rows(
         result,

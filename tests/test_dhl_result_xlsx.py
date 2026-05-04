@@ -2,7 +2,11 @@
 
 import unittest
 
-from dhl_result_xlsx import split_dhl_piece_ids_from_cell, split_fedex_twelve_digit_from_cell
+from dhl_result_xlsx import (
+    build_carrier_detail_rows,
+    split_dhl_piece_ids_from_cell,
+    split_fedex_twelve_digit_from_cell,
+)
 
 
 class TestSplitPieces(unittest.TestCase):
@@ -25,6 +29,32 @@ class TestSplitPieces(unittest.TestCase):
     def test_fedex(self):
         s = "871241251143 871241251154"
         self.assertEqual(split_fedex_twelve_digit_from_cell(s), ["871241251143", "871241251154"])
+
+    def test_detail_split_proportional(self):
+        """汇总重量/数量/价值按子单条数均分到明细行。"""
+        summary = [
+            {
+                "转单号": "4191468945",
+                "子单号(JD)": (
+                    "JD014600012592400513 JD014600012592400514 "
+                    "JD014600012592400515 JD014600012592400516"
+                ),
+                "关联条数": 4,
+                "耗时(秒)": "9.1",
+                "重量": "48",
+                "产品描述": "PVC卡",
+                "数量": "41",
+                "价值": "92.25",
+                "状态": "成功",
+            }
+        ]
+        detail = build_carrier_detail_rows(summary, related_col="子单号(JD)", is_dhl=True)
+        self.assertEqual(len(detail), 4)
+        self.assertEqual(detail[0]["件数"], "1")
+        self.assertEqual(detail[0]["重量"], "12")
+        self.assertEqual(detail[0]["数量"], "10.25")
+        self.assertEqual(detail[0]["价值"], "23.0625")
+        self.assertEqual(detail[0]["产品描述"], "PVC卡")
 
 
 if __name__ == "__main__":
