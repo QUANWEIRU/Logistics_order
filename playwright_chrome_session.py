@@ -138,7 +138,25 @@ def playwright_page_session(
             else:
                 pw = p.firefox
 
-            browser_inst = pw.launch(**launch_kwargs)
+            try:
+                browser_inst = pw.launch(**launch_kwargs)
+            except Exception as e:
+                # 系统 Google Chrome 不可用（典型场景：Streamlit Community Cloud 容器，
+                # 其 ``packages.txt`` 不能装第三方 google-chrome），自动回退到 Playwright
+                # 自带的 Chromium（无 channel）
+                msg = str(e).lower()
+                fallback_signals = (
+                    "chrome' is not found",
+                    "executable doesn't exist",
+                    "looks like playwright was just installed",
+                )
+                if launch_kwargs.get("channel") == "chrome" and any(
+                    sig in msg for sig in fallback_signals
+                ):
+                    launch_kwargs.pop("channel", None)
+                    browser_inst = pw.launch(**launch_kwargs)
+                else:
+                    raise
             page = browser_inst.new_page(
                 user_agent=(
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "

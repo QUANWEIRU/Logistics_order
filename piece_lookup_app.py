@@ -537,14 +537,17 @@ def _render_batch_lookup_section(opts: dict[str, Any]) -> None:
             "云端首次 FedEx / UPS 网页抓取会下载 Playwright 浏览器，耗时较长；若失败可在本机执行 "
             "`pip install -r requirements.txt && python -m playwright install chromium` 后本地运行。"
         )
-    if cloud and carrier == "DHL（子单 JD）" and not api_key and not force_scrape:
-        st.warning(
-            "未配置 **DHL_API_KEY** 时将走网页抓取（云端首次会下载浏览器）。"
-            "更稳定的方式：在 **Settings → Secrets** 或侧边栏填写密钥（[DHL Developer](https://developer.dhl.com)）。"
+    if cloud and carrier == "DHL（子单 JD）" and not api_key:
+        st.error(
+            "🚫 **云端查 DHL 几乎必然返回空结果**：未配置 `DHL_API_KEY` 时只能走 headless Playwright，"
+            "DHL 站使用 Akamai 反爬，会识别 headless 浏览器并拒绝返回 UTAPI 响应。\n\n"
+            "请在 **Settings → Secrets** 添加 `DHL_API_KEY`（[去 developer.dhl.com 申请](https://developer.dhl.com)），"
+            "或本地 / 自家 VPS 运行（见仓库 `deploy/README.md`）；"
+            "也可继续点「开始查询」体验失败流程。"
         )
     if cloud and carrier == "DHL（子单 JD）" and force_scrape:
         st.warning(
-            "已勾选「强制网页抓取」：云端将使用浏览器而非 API，首次可能需较长时间下载内核。"
+            "已勾选「强制网页抓取」：云端用 Chromium 跑 DHL 仍会被 Akamai 拦下。"
         )
 
     progress = st.progress(0.0, text="准备中…")
