@@ -215,13 +215,85 @@ def _collect_sidebar_opts() -> dict[str, Any]:
     }
 
 
+def _render_dhl_detail_cloud_fallback() -> None:
+    """
+    云端版 detail tab 的引导卡片：解释为何不可用 + 给出三条可执行替代方案。
+    保持与本地版一致的输入框布局，提交时仅给出友好提示，不再发起 CDP 连接。
+    """
+    st.warning(
+        "**「DHL 追踪详情」tab 在 Streamlit Community Cloud 上不可用。**\n\n"
+        "原因：本 tab 依赖一个**已通过 DHL Akamai 验证**的本机 Chrome（CDP 端口 18800），"
+        "云端容器是 ephemeral 沙箱，无 Chrome、无 Xvfb、也没法人工通过验证，"
+        "因此连接 18800 必然失败。",
+        icon="☁️",
+    )
+
+    st.markdown("### 你可以怎么办")
+    st.markdown(
+        "**A. 本地直接运行（最快）**\n\n"
+        "```bash\n"
+        "git clone https://github.com/QUANWEIRU/Logistics_order.git\n"
+        "cd Logistics_order && python3 -m venv .venv\n"
+        ".venv/bin/pip install -r requirements.txt\n"
+        ".venv/bin/streamlit run piece_lookup_app.py\n"
+        "```\n"
+        "需要本机有一个开了远程调试端口 18800 的 Chrome；启动方式见仓库 `deploy/README.md`。"
+    )
+    st.markdown(
+        "**B. 自家 Linux VPS 部署（长期可用）**\n\n"
+        "把 Chrome 用 Xvfb 跑成 systemd 常驻服务，首次通过 VNC 过一次 Akamai 验证后 24~72h 复用，"
+        "Streamlit 与 Chrome 同主机部署。整套脚本与手册在仓库 `deploy/` 下，5 步走："
+    )
+    st.code(
+        "sudo bash deploy/install-deps.sh\n"
+        "sudo cp deploy/dhl-chrome.service /etc/systemd/system/\n"
+        "sudo systemctl daemon-reload && sudo systemctl enable --now dhl-chrome\n"
+        "# 用 VNC 过一次 Akamai\n"
+        "python deploy/healthcheck.py   # 退出码 0 即就绪",
+        language="bash",
+    )
+    st.markdown(
+        "**C. 如果你只需要子单号 / 状态等基础信息**\n\n"
+        "切换到左边的「**批量子单号查询**」tab。云端版需要在 **Settings → Secrets** "
+        "里配置 `DHL_API_KEY`（[去 developer.dhl.com 申请](https://developer.dhl.com)），"
+        "走 DHL 官方 Unified Tracking API，无需浏览器，免费额度 250 calls/day。"
+    )
+
+    with st.expander("仍想看一眼输入框（仅作 UI 演示，提交无效）", expanded=False):
+        in_col, btn_col = st.columns([3, 1])
+        with in_col:
+            st.text_input(
+                "DHL 运单号",
+                placeholder="云端不可用",
+                key="dhl_detail_tn_in_cloud",
+                label_visibility="collapsed",
+                disabled=True,
+            )
+        with btn_col:
+            st.button(
+                "查询详情",
+                type="primary",
+                use_container_width=True,
+                disabled=True,
+                key="dhl_detail_run_btn_cloud",
+            )
+
+
 def _render_dhl_detail_section(opts: dict[str, Any]) -> None:
     """
     DHL 单运单深度追踪：调用 ``dhl_tracker.track`` 展示完整时间线 / POD / 签收图。
 
     依赖本机 Chrome 远程调试端口（默认 18800，可在 sidebar「Chrome CDP 地址」覆盖）；
     需事先在浏览器内手动打开过一次 DHL 追踪页通过 Akamai 验证。
+
+    在 **Streamlit Community Cloud** 这种 ephemeral 容器环境里：没有本机 Chrome、
+    没有 Xvfb、也没有人能 VNC 进去通过 Akamai 验证，本 tab 必然不可用——直接显示
+    引导卡片代替抛 ``ECONNREFUSED``，避免给访客看到红框报错。
     """
+    if _is_streamlit_community_cloud():
+        _render_dhl_detail_cloud_fallback()
+        return
+
     st.markdown(
         "**单运单深度追踪**：复用本机已通过 Akamai 验证的 Chrome（默认 CDP 端口 18800），"
         "拦截 DHL 页面自身发起的 UTAPI 响应，渲染完整状态、子单号、时间线与签收凭证。"
@@ -382,6 +454,22 @@ def _render_batch_lookup_section(opts: dict[str, Any]) -> None:
     chrome_udd_in = opts["chrome_udd_in"]
     max_rows = opts["max_rows"]
     column_index = opts["column_index"]
+
+    if _is_streamlit_community_cloud():
+        has_api_key = bool(_dhl_api_key_resolved(api_key_in))
+        st.info(
+            "☁️ **云端能力矩阵**\n\n"
+            "| 承运商 | 是否可用 | 说明 |\n"
+            "|---|---|---|\n"
+            f"| **DHL** | {'✅ 推荐' if has_api_key else '⚠️ 需 API Key'} | "
+            "配 `DHL_API_KEY` 走官方 Unified API（最稳）；"
+            "无 Key 走 headless Playwright，几乎一定被 Akamai 拦截 |\n"
+            "| **FedEx** | ⚠️ 偶发被 WAF 拦 | 走 headless Playwright；失败时可在结果区粘贴页面文本兜底解析 |\n"
+            "| **UPS** | ✅ 通常可用 | 走 headless Playwright；UPS 反爬较弱 |\n\n"
+            "👉 想要完整「DHL 追踪详情」（时间线 / POD / 签收图）请在本地或自家 VPS 运行，"
+            "见仓库 `deploy/README.md`。",
+            icon="ℹ️",
+        )
 
     tab_xlsx, tab_text = st.tabs(["上传 Excel", "粘贴单号"])
 
