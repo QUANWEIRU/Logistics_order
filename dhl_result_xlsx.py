@@ -28,6 +28,18 @@ def split_fedex_twelve_digit_from_cell(cell: str) -> list[str]:
     return list(dict.fromkeys(re.findall(r"\b\d{12}\b", cell)))
 
 
+_UPS_1Z_STRICT = re.compile(r"\b1Z[0-9A-Z]{16}\b", re.IGNORECASE)
+
+
+def split_ups_1z_from_cell(cell: str) -> list[str]:
+    """从 UPS 关联单元格中提取 1Z… 包裹单号（保序去重，统一大写）。"""
+    if not (cell or "").strip():
+        return []
+    return list(
+        dict.fromkeys(m.group(0).upper() for m in _UPS_1Z_STRICT.finditer(cell))
+    )
+
+
 def _parse_optional_float(raw: object) -> float | None:
     if raw is None:
         return None
@@ -51,18 +63,26 @@ def build_carrier_detail_rows(
     *,
     related_col: str,
     is_dhl: bool,
+    non_dhl_related_style: str = "fedex",
 ) -> list[dict[str, Any]]:
     """
     由汇总行生成明细行（页面与 Excel 共用）。
 
     DHL：列 转单号、子单号(JD)、件数、重量、产品描述、数量、价值（重量/数量/价值为按子单数均分）。
     FedEx：列 转单号、关联单号、件数、耗时(秒)、状态（无 Excel 件重价时不拆分数值）。
+    UPS：列 转单号、包裹单号(1Z)、件数、耗时(秒)、状态（与 FedEx 同属非 DHL 分支）。
+    non_dhl_related_style：非 DHL 时取值 fedex | ups，决定如何从关联列拆出多条单号。
     """
     out: list[dict[str, Any]] = []
     for r in summary_rows:
         waybill = str(r.get("转单号", ""))
         cell = str(r.get(related_col, ""))
-        pieces = split_dhl_piece_ids_from_cell(cell) if is_dhl else split_fedex_twelve_digit_from_cell(cell)
+        if is_dhl:
+            pieces = split_dhl_piece_ids_from_cell(cell)
+        elif non_dhl_related_style == "ups":
+            pieces = split_ups_1z_from_cell(cell)
+        else:
+            pieces = split_fedex_twelve_digit_from_cell(cell)
         n = len(pieces)
 
         if is_dhl:
@@ -135,6 +155,7 @@ def build_result_workbook_bytes(
     *,
     related_col: str,
     is_dhl: bool,
+    non_dhl_related_style: str = "fedex",
 ) -> bytes:
     """
     生成 xlsx 字节流。
@@ -160,7 +181,12 @@ def build_result_workbook_bytes(
 
     detail_name = "子单明细" if is_dhl else "单号明细"
     ws1 = wb.create_sheet(title=detail_name)
-    detail_rows = build_carrier_detail_rows(rows, related_col=related_col, is_dhl=is_dhl)
+    detail_rows = build_carrier_detail_rows(
+        rows,
+        related_col=related_col,
+        is_dhl=is_dhl,
+        non_dhl_related_style=non_dhl_related_style,
+    )
     if detail_rows:
         dh = list(detail_rows[0].keys())
         ws1.append(dh)

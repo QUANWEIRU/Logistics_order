@@ -17,11 +17,14 @@ _installed: set[str] = set()
 
 def ensure_playwright_browser_installed(browser: str) -> None:
     """
-    确保当前进程已安装指定内核（chromium / firefox / webkit）。
+    确保当前进程已安装指定内核（chrome 会映射到 chromium 内核）。
 
     同一内核只安装一次；失败时抛出 RuntimeError（stderr 摘要）。
     """
     b = (browser or "firefox").strip().lower()
+    # Playwright 的 channel=chrome 仍基于 chromium 内核能力
+    if b == "chrome":
+        b = "chromium"
     if b not in {"chromium", "firefox", "webkit"}:
         b = "firefox"
 

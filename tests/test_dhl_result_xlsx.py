@@ -6,6 +6,7 @@ from dhl_result_xlsx import (
     build_carrier_detail_rows,
     split_dhl_piece_ids_from_cell,
     split_fedex_twelve_digit_from_cell,
+    split_ups_1z_from_cell,
 )
 
 
@@ -29,6 +30,13 @@ class TestSplitPieces(unittest.TestCase):
     def test_fedex(self):
         s = "871241251143 871241251154"
         self.assertEqual(split_fedex_twelve_digit_from_cell(s), ["871241251143", "871241251154"])
+
+    def test_ups_1z(self):
+        s = "1ZB870570416816188 1ZB870570416995593"
+        self.assertEqual(
+            split_ups_1z_from_cell(s),
+            ["1ZB870570416816188", "1ZB870570416995593"],
+        )
 
     def test_detail_split_proportional(self):
         """汇总重量/数量/价值按子单条数均分到明细行。"""
@@ -55,6 +63,25 @@ class TestSplitPieces(unittest.TestCase):
         self.assertEqual(detail[0]["数量"], "10.25")
         self.assertEqual(detail[0]["价值"], "23.0625")
         self.assertEqual(detail[0]["产品描述"], "PVC卡")
+
+    def test_detail_ups_style(self):
+        summary = [
+            {
+                "转单号": "1ZB870570416816188",
+                "包裹单号(1Z)": "1ZB870570416816188 1ZB870570416995593",
+                "关联条数": 2,
+                "耗时(秒)": "12",
+                "状态": "成功",
+            }
+        ]
+        detail = build_carrier_detail_rows(
+            summary,
+            related_col="包裹单号(1Z)",
+            is_dhl=False,
+            non_dhl_related_style="ups",
+        )
+        self.assertEqual(len(detail), 2)
+        self.assertEqual(detail[0]["包裹单号(1Z)"], "1ZB870570416816188")
 
 
 if __name__ == "__main__":

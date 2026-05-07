@@ -1,0 +1,47 @@
+[Unit]
+Description=Persistent DHL Chrome (Xvfb + remote debugging on 18800)
+Documentation=file:/opt/Logistics_order/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# 部署步骤：
+#   sudo useradd -r -m -d /var/lib/dhl-chrome -s /usr/sbin/nologin dhlchrome
+#   sudo cp deploy/dhl-chrome.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now dhl-chrome
+Type=simple
+User=dhlchrome
+Group=dhlchrome
+WorkingDirectory=/var/lib/dhl-chrome
+Environment=HOME=/var/lib/dhl-chrome
+Environment=CDP_PORT=18800
+Environment=USER_DATA_DIR=/var/lib/dhl-chrome/profile
+Environment=LOG_FILE=/var/log/dhl-chrome/chrome.log
+Environment=DISPLAY_NUM=:99
+# 如需 VNC 远程过 Akamai：取消下两行注释，并把密码改成强密码
+# Environment=X11VNC_PORT=5900
+# Environment=X11VNC_PASSWORD=ChangeMeBeforeProd
+
+# 启动脚本路径：根据实际项目目录调整（README 里给了示例）
+ExecStartPre=/bin/mkdir -p /var/lib/dhl-chrome/profile /var/log/dhl-chrome
+ExecStartPre=/bin/chown -R dhlchrome:dhlchrome /var/lib/dhl-chrome /var/log/dhl-chrome
+ExecStart=/opt/Logistics_order/deploy/start-dhl-chrome.sh
+
+# Chrome 偶发崩溃 / Akamai cookie 过期由健康检查脚本触发的 systemctl restart 兜底
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+
+# 资源 / 安全收紧（按需放宽）
+LimitNOFILE=65536
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/dhl-chrome /var/log/dhl-chrome /tmp
+NoNewPrivileges=true
+
+# stdout/stderr 走 journal，方便 `journalctl -u dhl-chrome -f`
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

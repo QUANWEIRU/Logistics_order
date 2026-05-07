@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import time
 from collections.abc import Callable
 from typing import Any
@@ -17,7 +18,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import httpx
 
-from playwright_bootstrap import ensure_playwright_browser_installed
+from playwright_chrome_session import playwright_page_session
 
 # DHL Express 子单号：网页示例为 JD + 18 位数字；保留略宽模式以兼容变化
 PIECE_ID_RE_STRICT = re.compile(r"\bJD\d{18}\b")
@@ -164,12 +165,79 @@ def fetch_piece_ids_auto(url_or_number: str) -> list[str]:
     return fetch_piece_ids_scrape(url_or_number)
 
 
+# ─── CDP 探测：18800 可达时优先复用 OpenClaw 风格的 dhl_tracker ────
+
+
+def _parse_endpoint_host_port(endpoint: str) -> tuple[str, int] | None:
+    """从 ``http(s)://host:port[/...]`` 中提取 (host, port)，失败返回 None。"""
+    try:
+        u = urlparse(endpoint)
+        host = u.hostname or ""
+        port = u.port or (443 if u.scheme == "https" else 80)
+        return (host, int(port)) if host else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _cdp_endpoint_reachable(endpoint: str | None, *, timeout: float = 0.4) -> bool:
+    """快速 TCP 探测：默认 ~400ms 超时；不发 HTTP 请求避免被代理影响。"""
+    s = (endpoint or "").strip()
+    if not s:
+        return False
+    hp = _parse_endpoint_host_port(s)
+    if not hp:
+        return False
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        return sock.connect_ex(hp) == 0
+    except OSError:
+        return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _resolve_cdp_for_fast_path(explicit: str | None) -> str | None:
+    """
+    解析「快速通道」最终用的 CDP 端点：
+    - 用户显式传值 → 直接采用（不做端口探测，由 dhl_tracker 内部报错处理）；
+    - 环境变量 ``CHROME_CDP_ENDPOINT`` 有值 → 采用；
+    - 否则若本机默认端口 18800 已开 → 采用 ``http://127.0.0.1:18800``；
+    - 都不满足 → 返回 None（回退原 scrape 流程）。
+    """
+    s = (explicit or "").strip()
+    if s:
+        return s
+    s = (os.environ.get("CHROME_CDP_ENDPOINT") or "").strip()
+    if s:
+        return s
+    default = "http://127.0.0.1:18800"
+    return default if _cdp_endpoint_reachable(default) else None
+
+
+def _fetch_piece_ids_via_dhl_tracker(
+    tracking: str,
+    *,
+    cdp_endpoint: str | None,
+) -> list[str]:
+    """调用 dhl_tracker.track 并取 ``piece_ids``；任何异常都向上抛出。"""
+    from dhl_tracker import track
+
+    s = track(tracking, cdp_endpoint=cdp_endpoint)
+    return list(s.piece_ids)
+
+
 def fetch_piece_ids_scrape(
     url_or_number: str,
     *,
     locale_path: str = DEFAULT_TRACKING_LOCALE,
     headless: bool = True,
     browser: str = "firefox",
+    chrome_cdp_endpoint: str | None = None,
+    chrome_user_data_dir: str | None = None,
     navigation_timeout_ms: float = 120_000.0,
     poll_interval_ms: float = 1500.0,
     max_poll_rounds: int = 40,
@@ -177,17 +245,27 @@ def fetch_piece_ids_scrape(
     """
     无 API 密钥时：启动浏览器打开 DHL 追踪页，从 utapi 接口响应或 DOM 中提取 JD 子单号。
 
+    优化路径：若 CDP 端点可达（用户显式传值 / 环境变量 / 本机默认 18800），
+    优先调用 ``dhl_tracker``——直接复用已通过 Akamai 验证的本机 Chrome，速度更快、抗风控。
+    失败时再回退到下方的 firefox 兜底流程。
+
     需安装: pip install playwright && playwright install firefox
     browser: chromium | firefox | webkit（若 Chromium 报 HTTP2 错误可换 firefox/webkit）
     """
+    cdp_fast = _resolve_cdp_for_fast_path(chrome_cdp_endpoint)
+    if cdp_fast and not chrome_user_data_dir:
+        try:
+            return _fetch_piece_ids_via_dhl_tracker(url_or_number, cdp_endpoint=cdp_fast)
+        except Exception:
+            # CDP 路径失败（端口未开 / 浏览器未通过验证 / 其它）：回退到原浏览器抓取流程
+            pass
+
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as e:
         raise ImportError(
             "无 API 抓取需要 Playwright：pip install playwright && playwright install firefox"
         ) from e
-
-    ensure_playwright_browser_installed(browser)
 
     tid = parse_tracking_id(url_or_number)
     if url_or_number.strip().startswith("http"):
@@ -212,21 +290,14 @@ def fetch_piece_ids_scrape(
             pass
 
     with sync_playwright() as p:
-        launch_kwargs: dict[str, Any] = {"headless": headless}
-        if browser == "chromium":
-            launch_kwargs["args"] = ["--disable-http2"]
-
-        pw = getattr(p, browser)
-        browser_inst = pw.launch(**launch_kwargs)
-        page = browser_inst.new_page(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-        )
-        page.on("response", _on_response)
-
-        try:
+        with playwright_page_session(
+            p,
+            browser=browser,
+            headless=headless,
+            chrome_cdp_endpoint=chrome_cdp_endpoint,
+            chrome_user_data_dir=chrome_user_data_dir,
+        ) as page:
+            page.on("response", _on_response)
             _goto_tracking_page(page, start_url, navigation_timeout_ms)
             found_set = _poll_piece_ids_on_page(
                 page,
@@ -234,11 +305,6 @@ def fetch_piece_ids_scrape(
                 poll_interval_ms=poll_interval_ms,
                 max_poll_rounds=max_poll_rounds,
             )
-        except Exception:
-            browser_inst.close()
-            raise
-
-        browser_inst.close()
 
     return sorted(found_set)
 
@@ -293,6 +359,8 @@ def fetch_piece_ids_scrape_batch(
     locale_path: str = DEFAULT_TRACKING_LOCALE,
     headless: bool = True,
     browser: str = "firefox",
+    chrome_cdp_endpoint: str | None = None,
+    chrome_user_data_dir: str | None = None,
     navigation_timeout_ms: float = 120_000.0,
     poll_interval_ms: float = 1500.0,
     max_poll_rounds: int = 40,
@@ -303,17 +371,112 @@ def fetch_piece_ids_scrape_batch(
     """
     单次浏览器会话内依次查询多个转单号，返回 {运单号: [子单号...]}。
 
+    优化路径：若 CDP 端点可达（用户显式传值 / 环境变量 / 本机默认 18800）且未指定独立用户数据目录，
+    优先用 ``dhl_tracker.track_batch`` 复用已通过 Akamai 验证的本机 Chrome；CDP 路径任何项失败时
+    自动按需回退到下方的 firefox 兜底流程，仅对未拿到结果的运单重新走原 scrape。
+
     on_progress: 可选回调 (current_index: int, total: int, waybill: str) -> None，用于 UI 进度条。
     on_waybill_done: 每个运单查询结束后 (标准化运单号, 耗时秒) -> None。
     """
+    raw_list = [str(x).strip() for x in tracking_numbers if str(x).strip()]
+    if dedupe:
+        seen_in: set[str] = set()
+        ordered_in: list[str] = []
+        for t in raw_list:
+            if t not in seen_in:
+                seen_in.add(t)
+                ordered_in.append(t)
+        raw_list = ordered_in
+
+    if not raw_list:
+        return {}
+
+    cdp_fast = _resolve_cdp_for_fast_path(chrome_cdp_endpoint)
+    if cdp_fast and not chrome_user_data_dir:
+        from dhl_tracker import track_batch as _tracker_batch
+
+        try:
+            tracker_results = _tracker_batch(
+                raw_list,
+                cdp_endpoint=cdp_fast,
+                on_progress=on_progress,
+                on_waybill_done=on_waybill_done,
+            )
+        except Exception:
+            tracker_results = {}
+
+        results: dict[str, list[str]] = {}
+        missing: list[str] = []
+        for t in raw_list:
+            try:
+                tid = parse_tracking_id(t)
+            except ValueError:
+                continue
+            sm = tracker_results.get(tid)
+            if sm is not None and sm.piece_ids:
+                results[tid] = list(sm.piece_ids)
+            else:
+                missing.append(t)
+
+        if not missing:
+            return results
+
+        # 仅对 CDP 通道未取到结果的运单走兜底流程
+        fallback = _fetch_piece_ids_scrape_batch_via_playwright(
+            missing,
+            locale_path=locale_path,
+            headless=headless,
+            browser=browser,
+            chrome_cdp_endpoint=chrome_cdp_endpoint,
+            chrome_user_data_dir=chrome_user_data_dir,
+            navigation_timeout_ms=navigation_timeout_ms,
+            poll_interval_ms=poll_interval_ms,
+            max_poll_rounds=max_poll_rounds,
+            dedupe=False,
+            on_progress=None,
+            on_waybill_done=on_waybill_done,
+        )
+        results.update(fallback)
+        return results
+
+    return _fetch_piece_ids_scrape_batch_via_playwright(
+        raw_list,
+        locale_path=locale_path,
+        headless=headless,
+        browser=browser,
+        chrome_cdp_endpoint=chrome_cdp_endpoint,
+        chrome_user_data_dir=chrome_user_data_dir,
+        navigation_timeout_ms=navigation_timeout_ms,
+        poll_interval_ms=poll_interval_ms,
+        max_poll_rounds=max_poll_rounds,
+        dedupe=False,
+        on_progress=on_progress,
+        on_waybill_done=on_waybill_done,
+    )
+
+
+def _fetch_piece_ids_scrape_batch_via_playwright(
+    tracking_numbers: list[str],
+    *,
+    locale_path: str = DEFAULT_TRACKING_LOCALE,
+    headless: bool = True,
+    browser: str = "firefox",
+    chrome_cdp_endpoint: str | None = None,
+    chrome_user_data_dir: str | None = None,
+    navigation_timeout_ms: float = 120_000.0,
+    poll_interval_ms: float = 1500.0,
+    max_poll_rounds: int = 40,
+    dedupe: bool = True,
+    on_progress: Any | None = None,
+    on_waybill_done: Callable[[str, float], None] | None = None,
+) -> dict[str, list[str]]:
+    """原 firefox 兜底流程：单浏览器会话内串行查询多单。"""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as e:
         raise ImportError(
             "无 API 抓取需要 Playwright：pip install playwright && playwright install firefox"
         ) from e
-
-    ensure_playwright_browser_installed(browser)
 
     raw_list = [str(x).strip() for x in tracking_numbers if str(x).strip()]
     if dedupe:
@@ -346,47 +509,40 @@ def fetch_piece_ids_scrape_batch(
             pass
 
     with sync_playwright() as p:
-        launch_kwargs: dict[str, Any] = {"headless": headless}
-        if browser == "chromium":
-            launch_kwargs["args"] = ["--disable-http2"]
+        with playwright_page_session(
+            p,
+            browser=browser,
+            headless=headless,
+            chrome_cdp_endpoint=chrome_cdp_endpoint,
+            chrome_user_data_dir=chrome_user_data_dir,
+        ) as page:
+            page.on("response", _on_response)
 
-        pw = getattr(p, browser)
-        browser_inst = pw.launch(**launch_kwargs)
-        page = browser_inst.new_page(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-        )
-        page.on("response", _on_response)
-
-        total = len(raw_list)
-        for i, tid_in in enumerate(raw_list):
-            tid = parse_tracking_id(tid_in)
-            if on_progress:
-                on_progress(i + 1, total, tid)
-            start_url = (
-                tid_in.strip()
-                if tid_in.strip().startswith("http")
-                else build_tracking_page_url(tid, locale_path=locale_path)
-            )
-            api_json_hits.clear()
-            t0 = time.perf_counter()
-            try:
-                _goto_tracking_page(page, start_url, navigation_timeout_ms)
-                found_set = _poll_piece_ids_on_page(
-                    page,
-                    api_json_hits,
-                    poll_interval_ms=poll_interval_ms,
-                    max_poll_rounds=max_poll_rounds,
+            total = len(raw_list)
+            for i, tid_in in enumerate(raw_list):
+                tid = parse_tracking_id(tid_in)
+                if on_progress:
+                    on_progress(i + 1, total, tid)
+                start_url = (
+                    tid_in.strip()
+                    if tid_in.strip().startswith("http")
+                    else build_tracking_page_url(tid, locale_path=locale_path)
                 )
-                results[tid] = sorted(found_set)
-            except Exception:
-                results[tid] = []
-            if on_waybill_done:
-                on_waybill_done(tid, time.perf_counter() - t0)
-
-        browser_inst.close()
+                api_json_hits.clear()
+                t0 = time.perf_counter()
+                try:
+                    _goto_tracking_page(page, start_url, navigation_timeout_ms)
+                    found_set = _poll_piece_ids_on_page(
+                        page,
+                        api_json_hits,
+                        poll_interval_ms=poll_interval_ms,
+                        max_poll_rounds=max_poll_rounds,
+                    )
+                    results[tid] = sorted(found_set)
+                except Exception:
+                    results[tid] = []
+                if on_waybill_done:
+                    on_waybill_done(tid, time.perf_counter() - t0)
 
     return results
 

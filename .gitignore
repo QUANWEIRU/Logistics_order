@@ -14,6 +14,9 @@ node_delivery_tracker/node_modules/
 # 业务 Excel（运单与客户信息），不提交公开仓库；示例请自备放入 input/
 input/*.xlsx
 input/*.XLSX
+# 根目录散落的业务表（如 DHL <date>.xlsx）一律忽略
+/*.xlsx
+/*.XLSX
 output/*
 !output/.gitkeep
 
